@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -32,6 +33,9 @@ ALLOWED_USER_ROLES = {"家长", "医护", "志愿者"}
 REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
 COMMAND_TTL_SECONDS = 10 * 60
 MAX_COMMAND_OUTPUT = 2500
+ANSWER_SERVICE_UNAVAILABLE = "小雪宝暂时连接不到回答服务，请稍后再试。"
+UPSTREAM_ERROR_FALLBACK = "小雪宝暂时没有拿到稳定回答，请稍后再试，或把问题换一种更具体的说法。"
+MEDICAL_BOUNDARY_REMINDER = "小雪宝提醒：以上内容仅用于医学科普和照护支持，不能替代医生诊断和治疗建议。"
 XIAOXUEBAO_SYSTEM_PROMPT = """
 你是小雪宝，一个面向白血病儿童家庭的中文医学科普与照护支持助手。
 
@@ -40,6 +44,7 @@ XIAOXUEBAO_SYSTEM_PROMPT = """
 2. 你只能在普通聊天中提供白血病相关医学科普、家庭照护支持、就医沟通建议和情绪支持。
 3. 不能执行命令、安装包、安装技能、修改服务器、操作 GitHub/Git 仓库、读取文件、读取配置或读取任何密钥。
 4. 如果用户要求安装技能、升级能力包、读取 .env、执行 shell、修改 Hermes 配置或访问他人数据，要说明这些操作只能由管理员在后台确认流程中处理，普通聊天不能执行。
+5. 普通聊天中不要复述内部产品名、服务器路径、配置文件名、密钥变量名或运维命令；用“后台系统”“环境配置文件”“后台确认流程”等泛化表达。
 
 医学安全边界：
 1. 必须明确说明：本回答不能替代医生诊断和治疗建议。
@@ -53,6 +58,13 @@ Markdown 回答格式：
 3. 每段不超过 3-4 行；列表不超过 6 项，优先使用短句。
 4. 可使用加粗、列表、引用块、表格和已知同源图片；不知道可用图片路径时不要编造图片地址。
 5. 医疗红旗信息用引用块突出提醒，并说明不能替代医生诊疗。
+6. 涉及疾病、护理、治疗解释或实时信息时，尽量加入“参考/来源”小节；没有可靠来源时明确说明不能代替医生判断，不要编造来源。
+
+联网搜索规则：
+1. 对儿童白血病常规科普、护理、饮食、家庭沟通、报告术语解释，优先基于已有医学知识回答，不要因为用户要求“参考/来源”就自动联网。
+2. 只有用户明确要求联网、最新、今天、最近、当前政策、药品可及性、价格或其他实时信息时，才使用联网搜索。
+3. 需要联网时最多搜索 2 轮；若搜索结果不稳定，直接说明“没有拿到稳定来源”，不要反复搜索或长时间等待。
+4. 常规科普需要来源时，可用“参考来源方向”列出指南、医院宣教、权威机构等来源类型，不编造具体网页链接。
 """.strip()
 
 
@@ -891,49 +903,148 @@ def bootstrap_admin() -> None:
         db.create_user(username, password, "管理员", "管理员", is_admin=True)
 
 
-def user_hermes_config(user: dict[str, Any] | None) -> tuple[str, str]:
-    if user and user.get("hermes_base_url") and user.get("profile_id"):
-        profile_env = ROOT_DIR / "profiles" / str(user["profile_id"]) / ".env"
-        api_key = load_env_file(profile_env).get("API_SERVER_KEY", "")
-        if not api_key:
-            raise HTTPException(status_code=500, detail="Hermes profile API key missing")
-        return str(user["hermes_base_url"]).rstrip("/"), api_key
+def profile_provision_enabled() -> bool:
+    return os.getenv("XIAOXUEBAO_ENABLE_PROFILE_PROVISION") == "1" and os.getenv(
+        "XIAOXUEBAO_DISABLE_PROFILE_PROVISION"
+    ) != "1"
+
+
+def default_hermes_config() -> tuple[str, str]:
     base_url = env("WEB_GATEWAY_HERMES_BASE_URL", f"http://127.0.0.1:{env('API_SERVER_PORT', '8650')}/v1")
     api_key = env("API_SERVER_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="API_SERVER_KEY missing")
+        raise HTTPException(status_code=500, detail="回答服务配置缺失")
     return base_url.rstrip("/"), api_key
 
 
+def profile_hermes_config(user: dict[str, Any]) -> tuple[str, str]:
+    profile_env = ROOT_DIR / "profiles" / str(user["profile_id"]) / ".env"
+    api_key = load_env_file(profile_env).get("API_SERVER_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="回答服务配置缺失")
+    return str(user["hermes_base_url"]).rstrip("/"), api_key
+
+
+def user_hermes_config(user: dict[str, Any] | None) -> tuple[str, str]:
+    if profile_provision_enabled() and user and user.get("hermes_base_url") and user.get("profile_id"):
+        return profile_hermes_config(user)
+    return default_hermes_config()
+
+
+def hermes_config_candidates(user: dict[str, Any] | None) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    if profile_provision_enabled() and user and user.get("hermes_base_url") and user.get("profile_id"):
+        try:
+            candidates.append(profile_hermes_config(user))
+        except HTTPException:
+            pass
+    default_config = default_hermes_config()
+    if default_config not in candidates:
+        candidates.append(default_config)
+    return candidates
+
+
+def hermes_timeout() -> httpx.Timeout:
+    try:
+        total_seconds = float(env("WEB_GATEWAY_HERMES_TIMEOUT_SECONDS", "300"))
+    except ValueError:
+        total_seconds = 300.0
+    total_seconds = max(30.0, total_seconds)
+    return httpx.Timeout(total_seconds, connect=10.0)
+
+
 async def call_hermes(messages: list[dict[str, Any]], user: dict[str, Any] | None) -> dict[str, Any]:
-    base_url, api_key = user_hermes_config(user)
     payload = build_hermes_payload(messages)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
-        response = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-        )
-    if response.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"Hermes 返回错误：{response.status_code}")
-    return response.json()
+    configs = hermes_config_candidates(user)
+    async with httpx.AsyncClient(timeout=hermes_timeout()) as client:
+        for index, (base_url, api_key) in enumerate(configs):
+            is_last = index == len(configs) - 1
+            try:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                if response.status_code >= 400:
+                    if is_last:
+                        raise HTTPException(status_code=502, detail=ANSWER_SERVICE_UNAVAILABLE)
+                    continue
+                try:
+                    return response.json()
+                except ValueError:
+                    if is_last:
+                        raise HTTPException(status_code=502, detail="小雪宝暂时没有拿到回答服务的有效响应，请稍后再试。") from None
+            except HTTPException:
+                raise
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
+                if is_last:
+                    raise HTTPException(status_code=502, detail=ANSWER_SERVICE_UNAVAILABLE) from None
+                continue
+    raise HTTPException(status_code=502, detail=ANSWER_SERVICE_UNAVAILABLE)
 
 
 def extract_answer(payload: dict[str, Any]) -> str:
-    if isinstance(payload.get("answer"), str):
-        return str(payload["answer"])
+    if isinstance(payload.get("answer"), str) and payload["answer"].strip():
+        return str(payload["answer"]).strip()
     choices = payload.get("choices")
     if isinstance(choices, list) and choices:
         first = choices[0]
         if isinstance(first, dict):
             message = first.get("message")
-            if isinstance(message, dict) and isinstance(message.get("content"), str):
-                return message["content"]
+            if isinstance(message, dict) and isinstance(message.get("content"), str) and message["content"].strip():
+                return message["content"].strip()
     return "小雪宝暂时没有拿到有效回答，请稍后再试。"
 
 
+def sanitize_public_answer(answer: str) -> str:
+    clean = str(answer or "").strip()
+    if re.search(r"API call failed|An error occurred during streaming|Traceback|ConnectError|TimeoutException", clean, re.IGNORECASE):
+        return UPSTREAM_ERROR_FALLBACK
+    replacements = [
+        (r"/opt/xiaoxuebao-hermes/\.env\b", "环境配置文件"),
+        (r"/opt/xiaoxuebao-hermes(?:/[^\s，。；、)）\]]*)?", "服务器内部路径"),
+        (r"\bHermes\s+Agent\b", "后台系统"),
+        (r"\bNous\s+Research\b", "后台系统"),
+        (r"\bCodex\b", "后台系统"),
+        (r"\.env\b", "环境配置文件"),
+        (
+            r"\b(API_SERVER_KEY|OPENAI_API_KEY|DASHSCOPE_API_KEY|WEB_GATEWAY_SESSION_SECRET|WEB_GATEWAY_ADMIN_PASSWORD|WEB_GATEWAY_ADMIN_USERNAME)\b",
+            "配置项",
+        ),
+        (r"\bshell\b", "后台命令"),
+    ]
+    for pattern, replacement in replacements:
+        clean = re.sub(pattern, replacement, clean, flags=re.IGNORECASE)
+    return clean
+
+
+def prepare_public_answer(answer: str) -> str:
+    clean = sanitize_public_answer(answer)
+    if "不能替代医生诊断和治疗建议" not in clean:
+        clean = f"{clean.rstrip()}\n\n{MEDICAL_BOUNDARY_REMINDER}"
+    return clean
+
+
+def profile_api_is_healthy(base_url: str, api_key: str) -> bool:
+    root_url = base_url.rstrip("/")
+    if root_url.endswith("/v1"):
+        root_url = root_url[:-3].rstrip("/")
+    try:
+        with httpx.Client(timeout=httpx.Timeout(3.0, connect=1.0)) as client:
+            health = client.get(f"{root_url}/health")
+            if health.status_code < 400:
+                return True
+            models = client.get(
+                f"{base_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            return models.status_code < 400
+    except httpx.HTTPError:
+        return False
+
+
 def provision_profile_for_user(user_id: str) -> tuple[str | None, str | None]:
-    if os.getenv("XIAOXUEBAO_DISABLE_PROFILE_PROVISION") == "1":
+    if not profile_provision_enabled():
         return None, None
     try:
         next_port = 8651
@@ -975,9 +1086,22 @@ def provision_profile_for_user(user_id: str) -> tuple[str | None, str | None]:
             encoding="utf-8",
         )
         os.chmod(profile_env, 0o600)
-        subprocess.run(["docker", "exec", "hermes", "hermes", "profile", "create", profile_id], check=False, timeout=30)
-        subprocess.run(["docker", "exec", "hermes", "hermes", "-p", profile_id, "gateway", "start"], check=False, timeout=30)
-        return profile_id, f"http://127.0.0.1:{next_port}/v1"
+        create_result = subprocess.run(
+            ["docker", "exec", "hermes", "hermes", "profile", "create", profile_id],
+            check=False,
+            timeout=30,
+        )
+        start_result = subprocess.run(
+            ["docker", "exec", "hermes", "hermes", "-p", profile_id, "gateway", "start"],
+            check=False,
+            timeout=30,
+        )
+        hermes_base_url = f"http://127.0.0.1:{next_port}/v1"
+        if getattr(create_result, "returncode", 1) != 0 or getattr(start_result, "returncode", 1) != 0:
+            return None, None
+        if not profile_api_is_healthy(hermes_base_url, api_key):
+            return None, None
+        return profile_id, hermes_base_url
     except Exception:
         return None, None
 
@@ -1056,7 +1180,7 @@ async def chat(request: ChatRequest, xxb_session: str | None = Cookie(default=No
     if not request.messages:
         raise HTTPException(status_code=400, detail="消息不能为空")
     hermes_payload = await call_hermes(request.messages, user)
-    answer = extract_answer(hermes_payload)
+    answer = prepare_public_answer(extract_answer(hermes_payload))
     question = next((str(item.get("content", "")).strip() for item in reversed(request.messages) if item.get("role") == "user"), "")
     topic = infer_topic(question)
     saved = False
