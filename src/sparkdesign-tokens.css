@@ -1,0 +1,140 @@
+/* Spark Design — source-owned token layer
+ * Adapted from the Spark Design snow-warm preset
+ * for the Xiaoxuebao (LeukemiaPal) project.
+ */
+
+/* --- Spark root attributes --- */
+[data-style="snow-warm"] {
+  --spark-font-family: system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --spark-font-display: 'Nunito', system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --spark-radius: var(--seed-radius, 20px);
+  --spark-radius-sm: 8px;
+  --spark-radius-pill: 50px;
+  --spark-density: balanced;
+  --spark-gap-scale: 1;
+}
+
+/* --- Spark Button --- */
+.spark-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--spark-font-display);
+  font-weight: 600;
+  font-size: 0.938rem;
+  letter-spacing: 0.02em;
+  border: none;
+  cursor: pointer;
+  border-radius: var(--spark-radius-pill);
+  padding: 12px 28px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  text-decoration: none;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+.spark-btn-primary {
+  background: var(--seed-primary, #5BA4D9);
+  color: #fff;
+  box-shadow: 0 4px 0 0 rgba(26, 54, 93, 0.12);
+}
+
+.spark-btn-primary:hover {
+  background: color-mix(in srgb, var(--seed-primary, #5BA4D9) 85%, white);
+  transform: translateY(-1px);
+  box-shadow: 0 5px 0 0 rgba(26, 54, 93, 0.12);
+}
+
+.spark-btn-primary:active {
+  background: color-mix(in srgb, var(--seed-primary, #5BA4D9) 90%, black);
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 0 rgba(26, 54, 93, 0.12);
+}
+
+.spark-btn-secondary {
+  background: var(--seed-surface, #fff);
+  color: var(--seed-primary, #5BA4D9);
+  border: 2px solid var(--color-border, #E2E8F0);
+}
+
+.spark-btn-secondary:hover {
+  border-color: var(--seed-primary, #5BA4D9);
+  background: color-mix(in srgb, var(--seed-primary, #5BA4D9) 8%, var(--seed-surface, #fff));
+  transform: translateY(-1px);
+}
+
+.spark-btn-accent {
+  background: var(--seed-accent, #E8943A);
+  color: #fff;
+  box-shadow: 0 4px 0 0 rgba(26, 54, 93, 0.12);
+}
+
+.spark-btn-accent:hover {
+  background: color-mix(in srgb, var(--seed-accent, #E8943A) 85%, white);
+  transform: translateY(-1px);
+  box-shadow: 0 5px 0 0 rgba(26, 54, 93, 0.12);
+}
+
+/* --- Spark Card --- */
+.spark-card {
+  background: var(--seed-surface, #fff);
+  border-radius: var(--spark-radius, 20px);
+  border: 1px solid var(--color-border, #E2E8F0);
+  padding: 32px 28px;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.spark-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 28px rgba(26, 54, 93, 0.12);
+}
+
+.spark-card-flat {
+  background: var(--seed-surface, #fff);
+  border-radius: var(--spark-radius-sm, 8px);
+  border: 1px solid var(--color-border, #E2E8F0);
+  padding: 20px 24px;
+}
+
+/* --- Spark Section --- */
+.spark-section {
+  padding: 64px 24px;
+}
+
+@media (min-width: 768px) {
+  .spark-section {
+    padding: 96px 32px;
+  }
+}
+
+/* --- Spark Container --- */
+.spark-container {
+  max-width: 1120px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* --- Spark Badge --- */
+.spark-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--spark-font-display);
+  font-weight: 600;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  padding: 4px 12px;
+  border-radius: var(--spark-radius-pill);
+  background: color-mix(in srgb, var(--seed-accent, #E8943A) 12%, var(--seed-surface, #fff));
+  color: var(--seed-accent, #E8943A);
+}
+
+/* --- Spark Divider --- */
+.spark-divider {
+  height: 1px;
+  background: var(--color-border, #E2E8F0);
+  border: none;
+  margin: 0;
+}
