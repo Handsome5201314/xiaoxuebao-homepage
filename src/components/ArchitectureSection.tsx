@@ -27,12 +27,12 @@ export default function ArchitectureSection() {
           从家庭到服务层，小雪宝用清晰的分层架构保证每一次回答都可靠
         </p>
 
-        <div style={styles.flow}>
+        <div style={styles.flow} data-arch-flow>
           {architectureSteps.map((step, i) => {
             const Icon = stepIcons[i]
             const isLast = i === architectureSteps.length - 1
             return (
-              <div key={i} style={styles.stepGroup}>
+              <div key={i} style={styles.stepGroup} data-arch-step>
                 <div style={styles.node}>
                   <div style={styles.nodeIcon}>
                     <Icon size={22} weight="regular" />
@@ -41,7 +41,7 @@ export default function ArchitectureSection() {
                   <span style={styles.nodeSub}>{step.sublabel}</span>
                 </div>
                 {!isLast && (
-                  <div style={styles.arrow} aria-hidden="true">
+                  <div style={styles.arrow} aria-hidden="true" data-arch-arrow>
                     <svg width="32" height="12" viewBox="0 0 32 12" fill="none">
                       <path
                         d="M0 6H28M28 6L22 1M28 6L22 11"

@@ -14,6 +14,7 @@ export default function HeroSection() {
         ref={ref}
         className={`fade-in-up ${isVisible ? 'visible' : ''}`}
         style={styles.inner}
+        data-hero-inner
       >
         {/* Text column */}
         <div style={styles.textCol}>
@@ -21,7 +22,7 @@ export default function HeroSection() {
           <h1 style={styles.title}>{heroContent.title}</h1>
           <p style={styles.subtitle}>{heroContent.subtitle}</p>
           <p style={styles.description}>{heroContent.description}</p>
-          <div style={styles.ctaRow}>
+          <div style={styles.ctaRow} data-hero-cta>
             <Button
               variant="primary"
               as="anchor"
@@ -50,9 +51,9 @@ export default function HeroSection() {
 
         {/* Mascot column */}
         <div style={styles.mascotCol}>
-          <div className="float-animation" style={styles.mascotFrame}>
+          <div className="float-animation" style={styles.mascotFrame} data-hero-mascot-frame>
             <img
-              src="/assets/mascot.png"
+              src="/assets/mascot-snow.webp"
               alt={heroContent.mascotAlt}
               style={styles.mascotImg}
               onError={(e) => {
@@ -133,8 +134,8 @@ export default function HeroSection() {
             flex-wrap: wrap !important;
           }
           [data-hero-mascot-frame] {
-            width: 180px !important;
-            height: 200px !important;
+            width: 240px !important;
+            height: 180px !important;
           }
         }
       `}</style>
@@ -229,13 +230,15 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
   },
   mascotFrame: {
-    width: '280px',
-    height: '320px',
+    width: '340px',
+    height: '260px',
     borderRadius: 'var(--radius-xl)',
     overflow: 'hidden',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    background: 'linear-gradient(135deg, #e8f4fd 0%, #d6eaf8 100%)',
+    boxShadow: '0 8px 32px rgba(91, 164, 217, 0.15)',
   },
   mascotImg: {
     width: '100%',

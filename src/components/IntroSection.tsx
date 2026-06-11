@@ -17,7 +17,7 @@ export default function IntroSection() {
           一个为儿童白血病家庭而生的 AI 关爱项目
         </p>
 
-        <div style={styles.content}>
+        <div style={styles.content} data-intro-content>
           <div style={styles.textBlock}>
             {introContent.paragraphs.map((p, i) => (
               <p key={i} style={styles.paragraph}>
@@ -28,7 +28,7 @@ export default function IntroSection() {
 
           <div style={styles.visualBlock}>
             <img
-              src="/assets/scene-warm.png"
+              src="/assets/scene-warm.webp"
               alt="小雪宝的温暖魔法——一个可爱的白色角色戴着恐龙帽，手持放大镜，站在雪地里"
               style={styles.image}
               onError={(e) => {

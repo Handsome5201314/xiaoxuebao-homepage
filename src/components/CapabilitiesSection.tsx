@@ -19,7 +19,7 @@ export default function CapabilitiesSection() {
           小雪宝为家庭照护场景设计，每一项能力都围绕"可靠、可追溯、有温度"展开
         </p>
 
-        <div style={styles.grid}>
+        <div style={styles.grid} data-cap-grid>
           {capabilities.map((cap, i) => (
             <Card key={i} data-capability-card style={{ cursor: 'default' }}>
               <div style={styles.iconWrap}>
