@@ -10,6 +10,7 @@ import {
 } from '@phosphor-icons/react'
 import { listHistory, type AuthUser, type HistoryRecord } from '@/lib/api'
 import type React from 'react'
+import MarkdownMessage from './MarkdownMessage'
 
 interface UserHistoryProps {
   user: AuthUser
@@ -172,7 +173,9 @@ export default function UserHistory({ user, onBack, onLogout }: UserHistoryProps
                               <div style={styles.aAvatar}>
                                 <Snowflake size={14} weight="fill" style={{ color: 'var(--color-accent)' }} />
                               </div>
-                              <div style={styles.aBubble}>{record.answer}</div>
+                              <div style={styles.aBubble}>
+                                <MarkdownMessage content={record.answer} />
+                              </div>
                             </div>
                           </div>
                         )}

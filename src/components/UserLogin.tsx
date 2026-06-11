@@ -9,9 +9,10 @@ import {
   X,
   CheckCircle,
   WarningOctagon,
+  UserCircle,
 } from '@phosphor-icons/react'
 import { privacyConsent } from '@/data/privacyConsent'
-import { login, type AuthUser } from '@/lib/api'
+import { login, register, type AuthUser } from '@/lib/api'
 import type React from 'react'
 
 interface UserLoginProps {
@@ -20,8 +21,11 @@ interface UserLoginProps {
 }
 
 export default function UserLogin({ onLogin, onBack }: UserLoginProps) {
+  const [mode, setMode] = useState<'login' | 'register'>('login')
   const [phone, setPhone] = useState('')
   const [password, setPassword] = useState('')
+  const [name, setName] = useState('')
+  const [role, setRole] = useState<'家长' | '医护' | '志愿者'>('家长')
   const [showPassword, setShowPassword] = useState(false)
   const [consentChecked, setConsentChecked] = useState(false)
   const [showConsentModal, setShowConsentModal] = useState(false)
@@ -40,6 +44,16 @@ export default function UserLogin({ onLogin, onBack }: UserLoginProps) {
       setError('请输入密码')
       return
     }
+    if (mode === 'register') {
+      if (!name.trim()) {
+        setError('请输入昵称')
+        return
+      }
+      if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+        setError('密码至少 8 位，并同时包含字母和数字')
+        return
+      }
+    }
     if (!consentChecked) {
       setError('请先阅读并同意隐私知情同意书')
       return
@@ -47,7 +61,14 @@ export default function UserLogin({ onLogin, onBack }: UserLoginProps) {
 
     setIsSubmitting(true)
     try {
-      const user = await login(phone.trim(), password)
+      const user = mode === 'login'
+        ? await login(phone.trim(), password)
+        : await register({
+            phone: phone.trim(),
+            password,
+            name: name.trim(),
+            role,
+          })
       if (user.is_admin) {
         setError('管理员请从管理后台入口登录')
         return
@@ -79,7 +100,30 @@ export default function UserLogin({ onLogin, onBack }: UserLoginProps) {
             <Snowflake size={24} weight="fill" color="var(--color-primary)" />
           </div>
           <h1 style={styles.brandTitle}>小雪宝</h1>
-          <p style={styles.brandSubtitle}>用户登录</p>
+          <p style={styles.brandSubtitle}>{mode === 'login' ? '用户登录' : '用户注册'}</p>
+        </div>
+
+        <div style={styles.tabs} role="tablist" aria-label="用户登录注册">
+          <button
+            type="button"
+            style={{ ...styles.tab, ...(mode === 'login' ? styles.tabActive : {}) }}
+            onClick={() => {
+              setMode('login')
+              setError('')
+            }}
+          >
+            登录
+          </button>
+          <button
+            type="button"
+            style={{ ...styles.tab, ...(mode === 'register' ? styles.tabActive : {}) }}
+            onClick={() => {
+              setMode('register')
+              setError('')
+            }}
+          >
+            注册
+          </button>
         </div>
 
         {/* Form */}
@@ -104,6 +148,46 @@ export default function UserLogin({ onLogin, onBack }: UserLoginProps) {
             />
           </div>
 
+          {mode === 'register' && (
+            <>
+              <div style={styles.fieldGroup}>
+                <label htmlFor="user-name" style={styles.label}>
+                  <UserCircle size={14} weight="bold" style={{ flexShrink: 0 }} />
+                  昵称
+                </label>
+                <input
+                  id="user-name"
+                  type="text"
+                  placeholder="请输入昵称"
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value)
+                    setError('')
+                  }}
+                  autoComplete="name"
+                  style={styles.input}
+                />
+              </div>
+
+              <div style={styles.fieldGroup}>
+                <label htmlFor="user-role" style={styles.label}>
+                  <UserCircle size={14} weight="bold" style={{ flexShrink: 0 }} />
+                  身份
+                </label>
+                <select
+                  id="user-role"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value as '家长' | '医护' | '志愿者')}
+                  style={styles.select}
+                >
+                  <option value="家长">家长</option>
+                  <option value="医护">医护</option>
+                  <option value="志愿者">志愿者</option>
+                </select>
+              </div>
+            </>
+          )}
+
           {/* Password input */}
           <div style={styles.fieldGroup}>
             <label htmlFor="user-password" style={styles.label}>
@@ -114,13 +198,13 @@ export default function UserLogin({ onLogin, onBack }: UserLoginProps) {
               <input
                 id="user-password"
                 type={showPassword ? 'text' : 'password'}
-                placeholder="请输入密码"
+                placeholder={mode === 'login' ? '请输入密码' : '至少 8 位，含字母和数字'}
                 value={password}
                 onChange={(e) => {
                   setPassword(e.target.value)
                   setError('')
                 }}
-                autoComplete="current-password"
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
                 style={{ ...styles.input, paddingRight: '44px' }}
               />
               <button
@@ -189,13 +273,15 @@ export default function UserLogin({ onLogin, onBack }: UserLoginProps) {
               ...(consentChecked && !isSubmitting ? {} : styles.loginBtnDisabled),
             }}
           >
-            {isSubmitting ? '登录中…' : '登录'}
+            {isSubmitting ? (mode === 'login' ? '登录中…' : '注册中…') : (mode === 'login' ? '登录' : '注册并进入')}
           </button>
         </form>
 
         {/* Hint */}
         <p style={styles.hint}>
-          账号由管理员创建，登录后可查看自己的对话记录。
+          {mode === 'login'
+            ? '登录后可查看自己的对话记录。'
+            : '注册后立即可用，普通用户只能访问自己的对话和历史。'}
         </p>
 
         {/* Back button */}
@@ -311,6 +397,32 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: '4px',
   },
 
+  tabs: {
+    width: '100%',
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '6px',
+    padding: '4px',
+    background: 'var(--color-surface-secondary)',
+    borderRadius: 'var(--radius-pill)',
+    marginBottom: '22px',
+  },
+  tab: {
+    height: '38px',
+    border: 'none',
+    borderRadius: 'var(--radius-pill)',
+    background: 'transparent',
+    color: 'var(--color-text-muted)',
+    fontFamily: 'var(--font-display)',
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  tabActive: {
+    background: 'var(--color-surface)',
+    color: 'var(--color-text-heading)',
+    boxShadow: 'var(--shadow-sm)',
+  },
+
   /* Form */
   form: {
     width: '100%',
@@ -344,6 +456,18 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--color-text-body)',
     outline: 'none',
     transition: 'border-color 0.2s, box-shadow 0.2s',
+  },
+  select: {
+    width: '100%',
+    height: '46px',
+    padding: '0 16px',
+    borderRadius: 'var(--radius-md)',
+    border: '1.5px solid var(--color-border)',
+    background: 'var(--color-surface)',
+    fontFamily: 'var(--font-body)',
+    fontSize: '0.938rem',
+    color: 'var(--color-text-body)',
+    outline: 'none',
   },
   eyeBtn: {
     position: 'absolute',

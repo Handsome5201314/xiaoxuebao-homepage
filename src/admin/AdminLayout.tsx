@@ -6,6 +6,7 @@ import {
   PuzzlePiece,
   HardDrives,
   SignOut,
+  MagnifyingGlass,
 } from '@phosphor-icons/react'
 
 interface AdminLayoutProps {
@@ -20,6 +21,7 @@ const NAV_ITEMS = [
   { page: 'users',    label: '用户管理', Icon: UsersThree },
   { page: 'logs',     label: '问答日志', Icon: ChatText },
   { page: 'skills',   label: '技能管理', Icon: PuzzlePiece },
+  { page: 'search',   label: '搜索日志', Icon: MagnifyingGlass },
   { page: 'monitor',  label: '系统监控', Icon: HardDrives },
 ] as const
 

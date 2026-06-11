@@ -18,6 +18,7 @@ import {
 } from '@/data/chatContent'
 import { sendChat, type AuthUser, type ChatMessage } from '@/lib/api'
 import type React from 'react'
+import MarkdownMessage from './MarkdownMessage'
 
 /* ---------- Mock conversation history ---------- */
 interface ConversationItem {
@@ -298,7 +299,7 @@ function renderBubble(key: string, role: ChatMessage['role'], content: string, e
         )}
       </div>
       <div className={`chat-bubble chat-bubble--${role}`} style={error ? { borderColor: 'var(--color-danger)' } : undefined}>
-        {content}
+        {isUser ? content : <MarkdownMessage content={content} />}
       </div>
     </div>
   )

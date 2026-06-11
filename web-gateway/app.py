@@ -9,13 +9,15 @@ import os
 import secrets
 import sqlite3
 import subprocess
+import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 from uuid import uuid4
 
 import httpx
-from fastapi import Cookie, FastAPI, HTTPException, Response
+from fastapi import Cookie, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 
@@ -26,6 +28,19 @@ DATA_DIR = Path(os.getenv("XIAOXUEBAO_GATEWAY_DATA_DIR", ROOT_DIR / "web-gateway
 DB_PATH = Path(os.getenv("XIAOXUEBAO_GATEWAY_DB", DATA_DIR / "xiaoxuebao.db"))
 COOKIE_NAME = "xxb_session"
 UTC = dt.timezone.utc
+ALLOWED_USER_ROLES = {"家长", "医护", "志愿者"}
+REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
+COMMAND_TTL_SECONDS = 10 * 60
+MAX_COMMAND_OUTPUT = 2500
+MARKDOWN_RESPONSE_SYSTEM_PROMPT = """
+请用安全 Markdown 子集回答小雪宝用户的问题，避免输出一整段文字墙。
+要求：
+1. 先用 1-2 句给结论，然后按需要使用二级/三级小标题。
+2. 每段不超过 3-4 行；列表不超过 6 项，优先使用短句。
+3. 可使用加粗、列表、引用块、表格和同源图片；不要输出原始 HTML。
+4. 医疗红旗信息用引用块突出提醒，并说明不能替代医生诊疗。
+5. 不知道可用图片路径时不要编造图片地址。
+""".strip()
 
 
 def load_env_file(path: Path = ENV_PATH) -> dict[str, str]:
@@ -66,6 +81,13 @@ def public_time(value: str | None) -> str:
         return dt.datetime.fromisoformat(value).astimezone(UTC).strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return value[:16]
+
+
+def sanitize_log_text(value: str, *, max_length: int = 500) -> str:
+    clean = " ".join(str(value or "").replace("\x00", "").split())
+    if len(clean) > max_length:
+        return clean[: max_length - 1] + "…"
+    return clean
 
 
 def hash_password(password: str) -> str:
@@ -117,7 +139,7 @@ def build_hermes_payload(messages: Iterable[dict[str, Any]]) -> dict[str, Any]:
     ]
     return {
         "model": env("WEB_GATEWAY_MODEL", env("API_SERVER_MODEL_NAME", "xiaoxuebao-web")),
-        "messages": clean_messages,
+        "messages": [{"role": "system", "content": MARKDOWN_RESPONSE_SYSTEM_PROMPT}, *clean_messages],
         "temperature": 0.2,
     }
 
@@ -162,6 +184,35 @@ class Database:
                   question TEXT NOT NULL,
                   answer TEXT NOT NULL,
                   topic TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(user_id) REFERENCES users(id)
+                );
+                CREATE TABLE IF NOT EXISTS admin_command_logs (
+                  id TEXT PRIMARY KEY,
+                  admin_user_id TEXT NOT NULL,
+                  command_text TEXT NOT NULL,
+                  action TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  preview_json TEXT NOT NULL,
+                  confirmation_hash TEXT,
+                  expires_at TEXT NOT NULL,
+                  output_summary TEXT,
+                  error_summary TEXT,
+                  created_at TEXT NOT NULL,
+                  executed_at TEXT,
+                  FOREIGN KEY(admin_user_id) REFERENCES users(id)
+                );
+                CREATE TABLE IF NOT EXISTS web_search_logs (
+                  id TEXT PRIMARY KEY,
+                  profile_id TEXT NOT NULL,
+                  user_id TEXT,
+                  role TEXT NOT NULL,
+                  query TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  result_count INTEGER NOT NULL DEFAULT 0,
+                  status TEXT NOT NULL,
+                  error_summary TEXT,
+                  related_history_id TEXT,
                   created_at TEXT NOT NULL,
                   FOREIGN KEY(user_id) REFERENCES users(id)
                 );
@@ -297,6 +348,134 @@ class Database:
             for row in rows
         ]
 
+    def add_admin_command(
+        self,
+        *,
+        admin_user_id: str,
+        command_text: str,
+        action: str,
+        preview: dict[str, Any],
+        confirmation_hash: str,
+        expires_at: str,
+    ) -> dict[str, Any]:
+        item_id = "cmd_" + uuid4().hex[:16]
+        created_at = now_utc()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO admin_command_logs (
+                  id, admin_user_id, command_text, action, status, preview_json,
+                  confirmation_hash, expires_at, created_at
+                )
+                VALUES (?, ?, ?, ?, 'previewed', ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    admin_user_id,
+                    command_text,
+                    action,
+                    json.dumps(preview, ensure_ascii=False),
+                    confirmation_hash,
+                    expires_at,
+                    created_at,
+                ),
+            )
+            row = conn.execute("SELECT * FROM admin_command_logs WHERE id = ?", (item_id,)).fetchone()
+        return self._admin_command_from_row(row)
+
+    def get_admin_command(self, command_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM admin_command_logs WHERE id = ?", (command_id,)).fetchone()
+        return self._admin_command_from_row(row) if row else None
+
+    def finish_admin_command(
+        self,
+        command_id: str,
+        *,
+        status: str,
+        output_summary: str = "",
+        error_summary: str = "",
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE admin_command_logs
+                SET status = ?, output_summary = ?, error_summary = ?, executed_at = ?
+                WHERE id = ?
+                """,
+                (status, output_summary, error_summary, now_utc(), command_id),
+            )
+        return self.get_admin_command(command_id)
+
+    def list_admin_commands(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.*, u.name AS admin_name
+                FROM admin_command_logs c
+                JOIN users u ON u.id = c.admin_user_id
+                ORDER BY c.created_at DESC
+                LIMIT 100
+                """
+            ).fetchall()
+        return [self._admin_command_from_row(row) for row in rows]
+
+    def add_web_search_log(
+        self,
+        *,
+        profile_id: str,
+        user_id: str | None,
+        role: str,
+        query: str,
+        provider: str,
+        result_count: int,
+        status: str,
+        error_summary: str = "",
+        related_history_id: str | None = None,
+    ) -> dict[str, Any]:
+        item_id = "search_" + uuid4().hex[:16]
+        created_at = now_utc()
+        clean_query = sanitize_log_text(query, max_length=300)
+        clean_error = sanitize_log_text(error_summary, max_length=500)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO web_search_logs (
+                  id, profile_id, user_id, role, query, provider, result_count,
+                  status, error_summary, related_history_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    profile_id,
+                    user_id,
+                    role,
+                    clean_query,
+                    provider,
+                    int(result_count),
+                    status,
+                    clean_error,
+                    related_history_id,
+                    created_at,
+                ),
+            )
+            row = conn.execute("SELECT * FROM web_search_logs WHERE id = ?", (item_id,)).fetchone()
+        return self._web_search_log_from_row(row)
+
+    def list_web_search_logs(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT l.*, u.name AS user_name
+                FROM web_search_logs l
+                LEFT JOIN users u ON u.id = l.user_id
+                ORDER BY l.created_at DESC
+                LIMIT 300
+                """
+            ).fetchall()
+        return [self._web_search_log_from_row(row) for row in rows]
+
     def stats(self) -> dict[str, Any]:
         logs = self.list_all_history()
         users = self.list_users()
@@ -365,10 +544,49 @@ class Database:
             "topic": row["topic"],
         }
 
+    def _admin_command_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        preview = json.loads(row["preview_json"]) if row["preview_json"] else {}
+        return {
+            "id": row["id"],
+            "adminUserId": row["admin_user_id"],
+            "adminName": row["admin_name"] if "admin_name" in row.keys() else "",
+            "command": row["command_text"],
+            "action": row["action"],
+            "status": row["status"],
+            "preview": preview,
+            "expiresAt": row["expires_at"],
+            "outputSummary": row["output_summary"] or "",
+            "errorSummary": row["error_summary"] or "",
+            "createdAt": public_time(row["created_at"]),
+            "executedAt": public_time(row["executed_at"]),
+        }
+
+    def _web_search_log_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "profileId": row["profile_id"],
+            "userId": row["user_id"],
+            "userName": row["user_name"] if "user_name" in row.keys() else "",
+            "role": row["role"],
+            "query": row["query"],
+            "provider": row["provider"],
+            "resultCount": int(row["result_count"] or 0),
+            "status": row["status"],
+            "errorSummary": row["error_summary"] or "",
+            "time": public_time(row["created_at"]),
+        }
+
 
 class LoginRequest(BaseModel):
     identifier: str = Field(min_length=1)
     password: str = Field(min_length=1)
+
+
+class RegisterRequest(BaseModel):
+    phone: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    role: str = "家长"
 
 
 class ChatRequest(BaseModel):
@@ -384,6 +602,14 @@ class CreateUserRequest(BaseModel):
 
 class StatusRequest(BaseModel):
     status: str
+
+
+class AdminCommandPreviewRequest(BaseModel):
+    command: str = Field(min_length=2, max_length=300)
+
+
+class AdminCommandExecuteRequest(BaseModel):
+    confirmationToken: str = Field(min_length=16)
 
 
 db = Database()
@@ -463,6 +689,184 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
         "role": user["role"],
         "is_admin": bool(user["is_admin"]),
     }
+
+
+def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def enforce_registration_rate_limit(request: Request) -> None:
+    ip = client_ip(request)
+    now = time.time()
+    window_seconds = int(env("WEB_GATEWAY_REGISTER_WINDOW_SECONDS", "3600") or "3600")
+    max_attempts = int(env("WEB_GATEWAY_REGISTER_MAX_ATTEMPTS", "20") or "20")
+    recent = [item for item in REGISTRATION_ATTEMPTS.get(ip, []) if now - item < window_seconds]
+    if len(recent) >= max_attempts:
+        REGISTRATION_ATTEMPTS[ip] = recent
+        raise HTTPException(status_code=429, detail="注册过于频繁，请稍后再试")
+    recent.append(now)
+    REGISTRATION_ATTEMPTS[ip] = recent
+
+
+def validate_phone(phone: str) -> str:
+    clean = phone.strip()
+    if not clean.isdigit() or len(clean) != 11:
+        raise HTTPException(status_code=400, detail="请输入 11 位手机号")
+    return clean
+
+
+def validate_password_strength(password: str) -> None:
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="密码至少 8 位")
+    if not any(ch.isalpha() for ch in password) or not any(ch.isdigit() for ch in password):
+        raise HTTPException(status_code=400, detail="密码需同时包含字母和数字")
+
+
+def validate_display_name(name: str) -> str:
+    clean = sanitize_log_text(name, max_length=24)
+    if not clean:
+        raise HTTPException(status_code=400, detail="请输入昵称")
+    if any(ch in clean for ch in "<>{}[]"):
+        raise HTTPException(status_code=400, detail="昵称包含不支持的字符")
+    return clean
+
+
+def validate_public_role(role: str) -> str:
+    clean = role.strip()
+    if clean not in ALLOWED_USER_ROLES:
+        raise HTTPException(status_code=400, detail="角色不合法")
+    return clean
+
+
+def confirmation_hash(token: str) -> str:
+    return hmac.new(session_secret().encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def parse_admin_action(command: str) -> str:
+    clean = sanitize_log_text(command, max_length=300)
+    lowered = clean.lower()
+    blocked_terms = (
+        ".env",
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+        "cat ",
+        "rm ",
+        "sudo",
+        "bash",
+        "sh ",
+        "powershell",
+        "cmd",
+        "curl",
+        "wget",
+        "http://",
+        "https://",
+        "&&",
+        "||",
+        ";",
+        "|",
+        "`",
+        "$(",
+    )
+    if any(term in lowered for term in blocked_terms):
+        raise HTTPException(status_code=400, detail="该指令不在安全白名单内")
+    if any(word in lowered for word in ("安装", "install", "启用技能", "装技能")):
+        return "install_skills_from_pack"
+    if any(word in lowered for word in ("校验", "验证", "validate", "test")):
+        return "validate_ability_pack"
+    if any(word in lowered for word in ("升级", "更新", "update", "pull")):
+        return "ability_pack_update"
+    if any(word in lowered for word in ("状态", "检查", "status", "查看")):
+        return "ability_pack_status"
+    raise HTTPException(status_code=400, detail="只支持能力包状态、升级、校验和技能安装指令")
+
+
+def admin_command_preview(action: str) -> dict[str, Any]:
+    previews = {
+        "ability_pack_status": {
+            "title": "检查小雪宝能力包状态",
+            "riskLevel": "low",
+            "steps": ["读取能力包 Git 状态", "读取最近一次提交", "返回摘要，不修改文件"],
+        },
+        "ability_pack_update": {
+            "title": "升级小雪宝能力包",
+            "riskLevel": "medium",
+            "steps": ["在固定能力包目录执行 fast-forward 更新", "保留命令输出摘要", "失败时不改 Hermes 密钥"],
+        },
+        "validate_ability_pack": {
+            "title": "校验小雪宝能力包",
+            "riskLevel": "low",
+            "steps": ["运行能力包自带校验脚本", "记录校验输出", "不写入用户数据"],
+        },
+        "install_skills_from_pack": {
+            "title": "从小雪宝能力包安装技能",
+            "riskLevel": "medium",
+            "steps": ["只使用服务器固定能力包目录", "优先运行能力包安装脚本或 Hermes CLI", "记录安装结果摘要"],
+        },
+    }
+    return previews[action]
+
+
+def ability_pack_dir() -> Path:
+    return Path(env("XIAOXUEBAO_ABILITY_PACK_DIR", ROOT_DIR / "ability-pack"))
+
+
+def masked_output(text: str) -> str:
+    clean = sanitize_log_text(text, max_length=MAX_COMMAND_OUTPUT)
+    for value in load_env_file().values():
+        if value and len(value) >= 8:
+            clean = clean.replace(value, "***")
+    return clean
+
+
+def run_command(args: list[str], *, cwd: Path, timeout: int = 120) -> tuple[int, str, str]:
+    if not cwd.exists():
+        return 1, "", f"目录不存在：{cwd}"
+    completed = subprocess.run(
+        args,
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    return completed.returncode, masked_output(completed.stdout), masked_output(completed.stderr)
+
+
+def execute_admin_action(action: str) -> tuple[bool, str, str]:
+    pack_dir = ability_pack_dir()
+    if action == "ability_pack_status":
+        code_a, out_a, err_a = run_command(["git", "status", "--short", "--branch"], cwd=pack_dir, timeout=30)
+        code_b, out_b, err_b = run_command(["git", "log", "-1", "--oneline"], cwd=pack_dir, timeout=30)
+        ok = code_a == 0 and code_b == 0
+        return ok, "\n".join(part for part in (out_a, out_b) if part), "\n".join(part for part in (err_a, err_b) if part)
+    if action == "ability_pack_update":
+        code, out, err = run_command(["git", "pull", "--ff-only"], cwd=pack_dir, timeout=180)
+        return code == 0, out, err
+    if action == "validate_ability_pack":
+        script = pack_dir / "scripts" / "validate_pack.py"
+        if script.exists():
+            code, out, err = run_command([sys.executable, str(script)], cwd=pack_dir, timeout=180)
+            return code == 0, out, err
+        code, out, err = run_command(["git", "status", "--short"], cwd=pack_dir, timeout=30)
+        message = "未找到 scripts/validate_pack.py，已完成能力包目录与 Git 状态检查。"
+        return code == 0, "\n".join(part for part in (message, out) if part), err
+    if action == "install_skills_from_pack":
+        installer = pack_dir / "scripts" / "install_skills.py"
+        if installer.exists():
+            code, out, err = run_command([sys.executable, str(installer)], cwd=pack_dir, timeout=240)
+            return code == 0, out, err
+        code, out, err = run_command(
+            ["docker", "exec", "hermes", "hermes", "skills", "install", "/ability-pack"],
+            cwd=ROOT_DIR,
+            timeout=180,
+        )
+        return code == 0, out, err
+    return False, "", "未知动作"
 
 
 def bootstrap_admin() -> None:
@@ -551,6 +955,7 @@ def provision_profile_for_user(user_id: str) -> tuple[str | None, str | None]:
                     f"API_SERVER_MODEL_NAME=小雪宝-Hermes-{profile_id}",
                     "OPENAI_API_KEY=${OPENAI_API_KEY}",
                     "XIAOXUEBAO_ABILITY_PACK=/ability-pack",
+                    f"SEARXNG_URL=http://127.0.0.1:{env('WEB_GATEWAY_PORT', '8660')}/internal/search/{profile_id}",
                     "",
                 ]
             ),
@@ -579,6 +984,36 @@ async def login(request: LoginRequest, response: Response) -> dict[str, Any]:
     user = db.authenticate(request.identifier.strip(), request.password)
     if not user:
         raise HTTPException(status_code=401, detail="账号或密码错误")
+    response.set_cookie(
+        COOKIE_NAME,
+        create_session(user),
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=7 * 24 * 3600,
+        path="/",
+    )
+    return public_user(user)
+
+
+@app.post("/api/auth/register")
+async def register(request: RegisterRequest, http_request: Request, response: Response) -> dict[str, Any]:
+    enforce_registration_rate_limit(http_request)
+    phone = validate_phone(request.phone)
+    validate_password_strength(request.password)
+    name = validate_display_name(request.name)
+    role = validate_public_role(request.role)
+    if db.get_user_by_phone(phone):
+        raise HTTPException(status_code=409, detail="账号已存在")
+    temp_user = db.create_user(phone, request.password, name, role, is_admin=False)
+    profile_id, hermes_base_url = provision_profile_for_user(temp_user["id"])
+    if profile_id and hermes_base_url:
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE users SET profile_id = ?, hermes_base_url = ? WHERE id = ?",
+                (profile_id, hermes_base_url, temp_user["id"]),
+            )
+    user = db.get_user(temp_user["id"]) or temp_user
     response.set_cookie(
         COOKIE_NAME,
         create_session(user),
@@ -633,9 +1068,13 @@ async def admin_users(xxb_session: str | None = Cookie(default=None)) -> list[di
 @app.post("/api/admin/users")
 async def admin_create_user(request: CreateUserRequest, xxb_session: str | None = Cookie(default=None)) -> dict[str, Any]:
     require_admin(xxb_session)
-    if db.get_user_by_phone(request.phone.strip()):
+    phone = validate_phone(request.phone)
+    validate_password_strength(request.password)
+    name = validate_display_name(request.name)
+    role = validate_public_role(request.role)
+    if db.get_user_by_phone(phone):
         raise HTTPException(status_code=409, detail="账号已存在")
-    temp_user = db.create_user(request.phone.strip(), request.password, request.name.strip(), request.role)
+    temp_user = db.create_user(phone, request.password, name, role)
     profile_id, hermes_base_url = provision_profile_for_user(temp_user["id"])
     if profile_id and hermes_base_url:
         with db.connect() as conn:
@@ -673,3 +1112,138 @@ async def admin_history(xxb_session: str | None = Cookie(default=None)) -> list[
 async def admin_stats(xxb_session: str | None = Cookie(default=None)) -> dict[str, Any]:
     require_admin(xxb_session)
     return db.stats()
+
+
+@app.post("/api/admin/commands/preview")
+async def admin_command_preview_route(
+    request: AdminCommandPreviewRequest,
+    xxb_session: str | None = Cookie(default=None),
+) -> dict[str, Any]:
+    admin = require_admin(xxb_session)
+    command_text = sanitize_log_text(request.command, max_length=300)
+    action = parse_admin_action(command_text)
+    preview = admin_command_preview(action)
+    token = secrets.token_urlsafe(24)
+    expires_at = (dt.datetime.now(UTC) + dt.timedelta(seconds=COMMAND_TTL_SECONDS)).replace(microsecond=0).isoformat()
+    item = db.add_admin_command(
+        admin_user_id=admin["id"],
+        command_text=command_text,
+        action=action,
+        preview=preview,
+        confirmation_hash=confirmation_hash(token),
+        expires_at=expires_at,
+    )
+    return {
+        "id": item["id"],
+        "action": action,
+        "status": item["status"],
+        "preview": preview,
+        "expiresAt": expires_at,
+        "confirmationToken": token,
+    }
+
+
+@app.post("/api/admin/commands/{command_id}/execute")
+async def admin_command_execute_route(
+    command_id: str,
+    request: AdminCommandExecuteRequest,
+    xxb_session: str | None = Cookie(default=None),
+) -> dict[str, Any]:
+    admin = require_admin(xxb_session)
+    item = db.get_admin_command(command_id)
+    if not item or item["adminUserId"] != admin["id"]:
+        raise HTTPException(status_code=404, detail="命令不存在")
+    if item["status"] != "previewed":
+        raise HTTPException(status_code=409, detail="命令已处理")
+    try:
+        expires_at = dt.datetime.fromisoformat(item["expiresAt"]).astimezone(UTC)
+    except ValueError:
+        expires_at = dt.datetime.now(UTC) - dt.timedelta(seconds=1)
+    if expires_at < dt.datetime.now(UTC):
+        db.finish_admin_command(command_id, status="expired", error_summary="确认令牌已过期")
+        raise HTTPException(status_code=409, detail="确认令牌已过期")
+    with db.connect() as conn:
+        row = conn.execute("SELECT confirmation_hash FROM admin_command_logs WHERE id = ?", (command_id,)).fetchone()
+    if not row or not hmac.compare_digest(row["confirmation_hash"] or "", confirmation_hash(request.confirmationToken)):
+        raise HTTPException(status_code=403, detail="确认令牌不正确")
+    ok, output, error = execute_admin_action(item["action"])
+    updated = db.finish_admin_command(
+        command_id,
+        status="executed" if ok else "failed",
+        output_summary=output,
+        error_summary=error,
+    )
+    if not updated:
+        raise HTTPException(status_code=500, detail="命令日志更新失败")
+    return updated
+
+
+@app.get("/api/admin/commands")
+async def admin_commands(xxb_session: str | None = Cookie(default=None)) -> list[dict[str, Any]]:
+    require_admin(xxb_session)
+    return db.list_admin_commands()
+
+
+@app.get("/api/admin/search-logs")
+async def admin_search_logs(xxb_session: str | None = Cookie(default=None)) -> list[dict[str, Any]]:
+    require_admin(xxb_session)
+    return db.list_web_search_logs()
+
+
+async def proxy_searxng_search(profile_id: str, request: Request) -> dict[str, Any]:
+    query = str(request.query_params.get("q", "")).strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="搜索关键词不能为空")
+    user = db.get_user(profile_id)
+    user_id = user["id"] if user else None
+    role = "visitor"
+    if user:
+        role = "admin" if user["is_admin"] else "user"
+    base_url = env("SEARXNG_BASE_URL", "http://127.0.0.1:8661").rstrip("/")
+    params = dict(request.query_params)
+    params.setdefault("format", "json")
+    status = "ok"
+    result_count = 0
+    error_summary = ""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            response = await client.get(
+                f"{base_url}/search",
+                params=params,
+                headers={"User-Agent": "xiaoxuebao-web-gateway/1.0"},
+            )
+        if response.status_code >= 400:
+            status = "error"
+            error_summary = f"SearXNG 返回错误：{response.status_code}"
+            raise HTTPException(status_code=502, detail=error_summary)
+        payload = response.json()
+        results = payload.get("results") if isinstance(payload, dict) else None
+        result_count = len(results) if isinstance(results, list) else 0
+        return payload
+    except HTTPException:
+        raise
+    except Exception as exc:
+        status = "error"
+        error_summary = str(exc)
+        raise HTTPException(status_code=502, detail="联网搜索暂时不可用") from exc
+    finally:
+        db.add_web_search_log(
+            profile_id=profile_id,
+            user_id=user_id,
+            role=role,
+            query=query,
+            provider="searxng",
+            result_count=result_count,
+            status=status,
+            error_summary=error_summary,
+        )
+
+
+@app.get("/internal/search/{profile_id}")
+async def internal_search(profile_id: str, request: Request) -> dict[str, Any]:
+    return await proxy_searxng_search(profile_id, request)
+
+
+@app.get("/internal/search/{profile_id}/search")
+async def internal_search_compat(profile_id: str, request: Request) -> dict[str, Any]:
+    return await proxy_searxng_search(profile_id, request)

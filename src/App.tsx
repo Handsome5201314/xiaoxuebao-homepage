@@ -10,12 +10,13 @@ import DashboardOverview from '@/admin/DashboardOverview'
 import UserManagement from '@/admin/UserManagement'
 import ChatLogs from '@/admin/ChatLogs'
 import SkillManager from '@/admin/SkillManager'
+import SearchLogs from '@/admin/SearchLogs'
 import SystemMonitor from '@/admin/SystemMonitor'
 import { useIsMobile } from '@/hooks/useIsMobile'
 import { getCurrentUser, logout, type AuthUser } from '@/lib/api'
 
 type Page = 'chat' | 'intro' | 'user-login' | 'user-history' | 'admin-login' | 'admin-dashboard'
-type AdminPage = 'overview' | 'users' | 'logs' | 'skills' | 'monitor'
+type AdminPage = 'overview' | 'users' | 'logs' | 'skills' | 'search' | 'monitor'
 
 export default function App() {
   const [page, setPage] = useState<Page>('chat')
@@ -67,6 +68,7 @@ export default function App() {
       case 'users': return <UserManagement />
       case 'logs': return <ChatLogs />
       case 'skills': return <SkillManager />
+      case 'search': return <SearchLogs />
       case 'monitor': return <SystemMonitor />
       default: return <DashboardOverview />
     }

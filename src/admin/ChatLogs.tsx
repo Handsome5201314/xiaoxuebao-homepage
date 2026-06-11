@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MagnifyingGlass } from '@phosphor-icons/react'
 import { listAdminLogs, type AdminChatLog } from '@/lib/api'
+import MarkdownMessage from '@/components/MarkdownMessage'
 
 const TRUNCATE_LEN = 25
 
@@ -82,7 +83,8 @@ export default function ChatLogs() {
                     <td colSpan={5}>
                       <div className="admin-expand-panel">
                         <p><strong>提问：</strong>{log.question}</p>
-                        <p><strong>回答：</strong>{log.answer}</p>
+                        <p><strong>回答：</strong></p>
+                        <MarkdownMessage content={log.answer} />
                       </div>
                     </td>
                   </tr>
@@ -107,7 +109,8 @@ export default function ChatLogs() {
                 {isExpanded && (
                   <div className="admin-expand-panel" style={{ marginTop: 8, borderRadius: 'var(--admin-radius-sm)' }}>
                     <p><strong>提问：</strong>{log.question}</p>
-                    <p><strong>回答：</strong>{log.answer}</p>
+                    <p><strong>回答：</strong></p>
+                    <MarkdownMessage content={log.answer} />
                   </div>
                 )}
               </div>

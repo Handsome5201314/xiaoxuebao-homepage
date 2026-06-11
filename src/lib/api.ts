@@ -61,6 +61,52 @@ export interface AdminStats {
   recentLogs: AdminChatLog[]
 }
 
+export interface AdminCommandPreview {
+  id: string
+  action: 'ability_pack_status' | 'ability_pack_update' | 'validate_ability_pack' | 'install_skills_from_pack'
+  status: 'previewed'
+  confirmationToken: string
+  expiresAt: string
+  preview: {
+    title: string
+    riskLevel: 'low' | 'medium' | 'high'
+    steps: string[]
+  }
+}
+
+export interface AdminCommandLog {
+  id: string
+  adminUserId: string
+  adminName: string
+  command: string
+  action: string
+  status: 'previewed' | 'executed' | 'failed' | 'expired'
+  preview: {
+    title: string
+    riskLevel: string
+    steps: string[]
+  }
+  expiresAt: string
+  outputSummary: string
+  errorSummary: string
+  createdAt: string
+  executedAt: string
+}
+
+export interface AdminSearchLog {
+  id: string
+  profileId: string
+  userId: string | null
+  userName: string
+  role: 'visitor' | 'user' | 'admin'
+  query: string
+  provider: string
+  resultCount: number
+  status: 'ok' | 'error'
+  errorSummary: string
+  time: string
+}
+
 interface ApiErrorPayload {
   detail?: string
   error?: string
@@ -107,6 +153,23 @@ export async function login(identifier: string, password: string): Promise<AuthU
   })
 }
 
+export async function register(input: {
+  phone: string
+  password: string
+  name: string
+  role: string
+}): Promise<AuthUser> {
+  return apiFetch<AuthUser>('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      phone: input.phone,
+      password: input.password,
+      name: input.name,
+      role: input.role,
+    }),
+  })
+}
+
 export async function logout(): Promise<void> {
   await apiFetch('/api/auth/logout', { method: 'POST' })
 }
@@ -148,6 +211,28 @@ export async function listAdminLogs(): Promise<AdminChatLog[]> {
 
 export async function getAdminStats(): Promise<AdminStats> {
   return apiFetch<AdminStats>('/api/admin/stats')
+}
+
+export async function previewAdminCommand(command: string): Promise<AdminCommandPreview> {
+  return apiFetch<AdminCommandPreview>('/api/admin/commands/preview', {
+    method: 'POST',
+    body: JSON.stringify({ command }),
+  })
+}
+
+export async function executeAdminCommand(commandId: string, confirmationToken: string): Promise<AdminCommandLog> {
+  return apiFetch<AdminCommandLog>(`/api/admin/commands/${encodeURIComponent(commandId)}/execute`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmationToken }),
+  })
+}
+
+export async function listAdminCommands(): Promise<AdminCommandLog[]> {
+  return apiFetch<AdminCommandLog[]>('/api/admin/commands')
+}
+
+export async function listAdminSearchLogs(): Promise<AdminSearchLog[]> {
+  return apiFetch<AdminSearchLog[]>('/api/admin/search-logs')
 }
 
 async function apiFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
